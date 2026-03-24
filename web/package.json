@@ -4,6 +4,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "clean": "node -e \"const fs=require('fs');['public/build','storybook-static'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}));\"",
+    "clean:all": "npm run clean --silent && node -e \"const fs=require('fs');['node_modules','package-lock.json'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}));\" && npm cache clean --force",
     "test:unit": "vitest --coverage --ui",
     "ci:unit": "LARAVEL_BYPASS_ENV_CHECK=1 CI=1 vitest --run --watch=false",
     "format:write": "prettier ./resources/js ./plugins/visualization --write",
@@ -47,6 +49,7 @@
   "dependencies": {
     "@headlessui/vue": "^1.7.23",
     "@heroicons/vue": "^2.2.0",
+    "@openqda/gabriel": "file:../../plugins/gabriel",
     "@openqda/visualization": "file:plugins/visualization",
     "@tailwindcss/vite": "^4.0.13",
     "@thin-storage/core": "^1.0.2",

@@ -31,16 +31,19 @@ return [
         'reverb' => [
             'host' => env('REVERB_SERVER_HOST', '0.0.0.0'),
             'port' => env('REVERB_SERVER_PORT', 8080),
-            'hostname' => env('REVERB_HOST'),
-            'options' => [
-                'tls' => [
-                    'local_cert' => env('LARAVEL_WEBSOCKETS_SSL_LOCAL_CERT', null),
-                    'local_pk' => env('LARAVEL_WEBSOCKETS_SSL_LOCAL_PK', null),
-                    'cafile' => env('LARAVEL_WEBSOCKETS_SSL_CAFILE', null),
-                    'passphrase' => null,
-                    'verify_peer' => false,
-                ],
-            ],
+            'hostname' => env('REVERB_SERVER_HOSTNAME'),
+            // Enable TLS only when an explicit certificate path is configured.
+            'options' => env('LARAVEL_WEBSOCKETS_SSL_LOCAL_CERT')
+                ? [
+                    'tls' => [
+                        'local_cert' => env('LARAVEL_WEBSOCKETS_SSL_LOCAL_CERT'),
+                        'local_pk' => env('LARAVEL_WEBSOCKETS_SSL_LOCAL_PK', null),
+                        'cafile' => env('LARAVEL_WEBSOCKETS_SSL_CAFILE', null),
+                        'passphrase' => null,
+                        'verify_peer' => false,
+                    ],
+                ]
+                : [],
             'scaling' => [
                 'enabled' => env('REVERB_SCALING_ENABLED', false),
                 'channel' => env('REVERB_SCALING_CHANNEL', 'reverb'),
