@@ -49,7 +49,7 @@
   "dependencies": {
     "@headlessui/vue": "^1.7.23",
     "@heroicons/vue": "^2.2.0",
-    "@openqda/gabriel": "file:../../plugins/gabriel",
+    "@openqda/gabriel": "file:plugins/gabriel",
     "@openqda/visualization": "file:plugins/visualization",
     "@tailwindcss/vite": "^4.0.13",
     "@thin-storage/core": "^1.0.2",
