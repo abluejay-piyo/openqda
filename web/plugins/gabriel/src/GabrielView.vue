@@ -398,6 +398,16 @@
 <script setup>
 import { ref, inject, computed, watch, reactive } from 'vue';
 
+const props = defineProps([
+  'codes',
+  'selections',
+  'sources',
+  'checkedCodes',
+  'checkedSources',
+  'menu',
+  'showMenu',
+]);
+
 const injectedApi = inject('api', null);
 const fallbackApi = {
   sources: [],
@@ -415,19 +425,26 @@ const readArray = (value) => {
 
 const createOpenQdaInputAdapter = (api) => {
   const getSelections = () => {
-    if (typeof api.getAllSelections !== 'function') return [];
-    return api.getAllSelections();
+    if (props.selections) return Array.isArray(props.selections) ? props.selections : Array.from(props.selections);
+    if (typeof api.getAllSelections === 'function') return api.getAllSelections();
+    return [];
   };
 
-  const getCodes = () => readArray(api.codes);
+  const getCodes = () => {
+    if (props.codes) return Array.isArray(props.codes) ? props.codes : Array.from(props.codes);
+    return readArray(api.codes);
+  };
 
   const getCheckedSources = () => {
+    if (props.sources && props.checkedSources && typeof props.checkedSources.get === 'function') {
+      return props.sources.filter(source => props.checkedSources.get(source.id));
+    }
+    // Fallback for context outside visualization (e.g. Codify source view)
     if (typeof api.eachCheckedSources === 'function') {
       const out = [];
       api.eachCheckedSources((source) => out.push(source));
       return out;
     }
-
     return readArray(api.sources);
   };
 
@@ -732,23 +749,39 @@ const effectiveModel = computed(() => {
 // ── Codify ────────────────────────────────────────────────────────────────
 const availableCodes = computed(() => inputAdapter.getCodes());
 
-const checkedSources = computed(() => inputAdapter.getCheckedSources());
+const codifySources = ref([]);
 
-const codifySources = computed(() => {
-  return checkedSources.value;
-});
+const updateCheckedSources = () => {
+  // If we have props and the Map, use our deep watcher strategy
+  if (props.sources && props.checkedSources) {
+    const list = props.sources.filter(source => {
+      // Force dependency tracking if reactivity applies natively
+      const isChecked = typeof props.checkedSources.get === 'function' && props.checkedSources.get(source.id);
+      return isChecked;
+    });
+    codifySources.value = list;
+    return;
+  }
+
+  // Fallback for standalone/CodifyView contexts
+  if (typeof analyzeApi.eachCheckedSources === 'function') {
+    const out = [];
+    analyzeApi.eachCheckedSources((s) => out.push(s));
+    codifySources.value = out;
+    return;
+  }
+  codifySources.value = readArray(analyzeApi.sources);
+};
+
+// Listen to deep changes on props so adding new checks forces UI refresh
+watch(() => props, () => {
+  updateCheckedSources();
+}, { deep: true, immediate: true });
 const codify = reactive({
   selectedSourceId: '',
   selectedCodeId: '',
   codeDescription: '',
   instructions: 'Focus only on statements made by the participant/user. Ignore interviewer, facilitator, or AI assistant prompts.',
-});
-
-// If only one source is checked it auto-selects; otherwise uses the dropdown choice
-const codifySourceId = computed(() => {
-  if (codifySources.value.length === 0) return '';
-  if (codifySources.value.length === 1) return codifySources.value[0].id;
-  return codify.selectedSourceId || codifySources.value[0].id;
 });
 
 const selectedCode = computed(() =>
@@ -835,7 +868,7 @@ const hasValidAttributes = computed(() => activeRateAttributes.value.length > 0)
 const canRun = computed(() => {
   switch (activeTab.value) {
     case 'codify':
-      return !!codifySourceId.value && !!codify.selectedCodeId;
+      return codifySources.value.length > 0 && !!codify.selectedCodeId;
     case 'classify':
       return selections.value.length > 0 && hasValidLabels.value;
     case 'extract':
@@ -856,11 +889,11 @@ const statusLine = computed(() => {
     if (codifySources.value.length === 0) return 'Please check a source in the sidebar first.';
     if (!codify.selectedCodeId) return 'Select a code above.';
 
-    const srcName =
-      codifySources.value.find(
-        (source) => String(source.id) === String(codifySourceId.value)
-      )?.name ?? '';
-    return `Ready — GABRIEL will scan “${srcName}” for “${selectedCodeName.value}”`;
+    const sourceCount = codifySources.value.length;
+    const srcName = sourceCount === 1
+      ? `“${codifySources.value[0].name}”`
+      : `${sourceCount} sources`;
+    return `Ready — GABRIEL will scan ${srcName} for “${selectedCodeName.value}”`;
   }
   if (selections.value.length === 0) return 'No coded passages found.';
   return `${selections.value.length} passage${selections.value.length !== 1 ? 's' : ''} selected`;
@@ -943,9 +976,8 @@ const findPassageRange = (text, passage, fromIndex = 0) => {
   return null;
 };
 
-const persistCodifySelections = async ({ transcript, items }) => {
+const persistCodifySelections = async ({ transcript, items, sourceId }) => {
   const projectId = getProjectIdFromPath();
-  const sourceId = String(codifySourceId.value ?? '');
   const codeId = String(codify.selectedCodeId ?? '');
 
   if (!projectId || !sourceId || !codeId) {
@@ -1054,50 +1086,89 @@ const run = async () => {
   });
 
   if (activeTab.value === 'codify') {
-    const source = codifySources.value.find(
-      (entry) => String(entry.id) === String(codifySourceId.value)
-    );
-    if (!source) {
-      error.value = 'Selected source was not found in checked sources.';
+    if (codifySources.value.length === 0) {
+      error.value = 'No sources selected.';
       loading.value = false;
       return;
     }
 
-    let transcript = htmlToPlainText(source.content ?? '');
-    if (!transcript) {
-      try {
-        transcript = await fetchSourceTranscript(codifySourceId.value);
-      } catch (e) {
-        error.value = e?.message || 'Could not load source text for codify.';
-        loading.value = false;
-        return;
+    codifyTextsPool.value = [];
+    results.value = [];
+    let totalAppliedCount = 0;
+    let hasFailure = false;
+    let failMessage = '';
+
+    for (const source of codifySources.value) {
+      let transcript = htmlToPlainText(source.content ?? '');
+      if (!transcript) {
+        try {
+          transcript = await fetchSourceTranscript(source.id);
+        } catch (e) {
+          error.value = e?.message || 'Could not load source text for codify.';
+          hasFailure = true;
+          break;
+        }
       }
+
+      if (!transcript) continue;
+
+      codifyTextsPool.value.push({
+        id: String(source.id),
+        text: transcript,
+      });
+
+      const singleBody = { ...body };
+      Object.assign(
+        singleBody,
+        buildFunctionPayload({
+          functionKey: activeTab.value,
+          selections: [{ id: String(source.id), text: transcript }],
+          selectedCodeName: selectedCodeName.value,
+          codify,
+          classify,
+          extract,
+          filter,
+          rate,
+        })
+      );
+
+      const res = await requestJson({
+        requestFn: analyzeApi.request,
+        url: currentFunction.endpoint,
+        body: singleBody,
+      });
+
+      if (res.error || !res.response || res.response.status >= 400) {
+        error.value = normalizeError(res);
+        hasFailure = true;
+        break;
+      }
+
+      const items = res.response.data ?? [];
+      const appliedInSource = items.reduce(
+        (count, item) => count + (Array.isArray(item.passages) ? item.passages.length : 0),
+        0
+      );
+      totalAppliedCount += appliedInSource;
+
+      if (transcript && items.length > 0) {
+        const persisted = await persistCodifySelections({ transcript, items, sourceId: String(source.id) });
+        if (persisted.failed > 0 && persisted.saved === 0) {
+          failMessage = persisted.firstFailure
+            ? `Codify matched passages, but some were not saved to OpenQDA selections. ${persisted.firstFailure}`
+            : 'Codify matched passages, but some were not saved to OpenQDA selections.';
+        }
+      }
+
+      results.value.push(...items);
     }
 
-    if (!transcript) {
-      error.value = 'The selected source has no readable transcript text.';
-      loading.value = false;
-      return;
+    if (failMessage && !error.value) {
+      error.value = failMessage;
     }
 
-    codifyTextsPool.value = [{
-      id: String(codifySourceId.value),
-      text: transcript,
-    }];
-
-    Object.assign(
-      body,
-      buildFunctionPayload({
-        functionKey: activeTab.value,
-        selections: [{ id: codifySourceId.value, text: transcript }],
-        selectedCodeName: selectedCodeName.value,
-        codify,
-        classify,
-        extract,
-        filter,
-        rate,
-      })
-    );
+    codifyAppliedCount.value = totalAppliedCount;
+    loading.value = false;
   } else {
     Object.assign(
       body,
@@ -1112,41 +1183,20 @@ const run = async () => {
         rate,
       })
     );
-  }
 
-  const res = await requestJson({
-    requestFn: analyzeApi.request,
-    url: currentFunction.endpoint,
-    body,
-  });
+    const res = await requestJson({
+      requestFn: analyzeApi.request,
+      url: currentFunction.endpoint,
+      body,
+    });
 
-  if (res.error || !res.response || res.response.status >= 400) {
-    error.value = normalizeError(res);
-    loading.value = false;
-    return;
-  }
-
-  const items = res.response.data ?? [];
-
-  if (activeTab.value === 'codify') {
-    const transcript = codifyTextsPool.value[0]?.text ?? '';
-    codifyAppliedCount.value = items.reduce(
-      (count, item) => count + (Array.isArray(item.passages) ? item.passages.length : 0),
-      0
-    );
-
-    if (transcript) {
-      const persisted = await persistCodifySelections({ transcript, items });
-      if (persisted.failed > 0 && persisted.saved === 0) {
-          error.value = persisted.firstFailure
-            ? `Codify matched passages, but none were saved to OpenQDA selections. ${persisted.firstFailure}`
-            : 'Codify matched passages, but none were saved to OpenQDA selections.';
-      }
+    if (res.error || !res.response || res.response.status >= 400) {
+      error.value = normalizeError(res);
+      loading.value = false;
+      return;
     }
 
-    results.value = items;
-    loading.value = false;
-  } else {
+    const items = res.response.data ?? [];
     results.value = items;
     loading.value = false;
   }
