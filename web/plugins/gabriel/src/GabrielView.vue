@@ -19,7 +19,12 @@
     </div>
 
     <!-- Description -->
-    <p class="text-sm text-foreground/60">{{ currentTab.desc }}</p>
+    <div class="flex items-center justify-between gap-2">
+      <p class="text-sm text-foreground/60">{{ currentTab.desc }}</p>
+      <span class="text-[11px] px-2 py-0.5 rounded border border-border text-foreground/50 bg-surface/50">
+        Plugin v{{ GABRIEL_PLUGIN_VERSION }}
+      </span>
+    </div>
 
     <!-- Config form -->
     <form @submit.prevent="run" class="space-y-3">
@@ -208,19 +213,16 @@
         <summary class="cursor-pointer text-sm font-medium">Advanced options</summary>
         <div class="space-y-3 mt-3">
           <div>
-            <label class="block text-xs font-medium uppercase mb-1">Model</label>
-            <div class="flex gap-2">
-              <select v-model="modelProvider" class="w-36 border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-secondary bg-surface text-foreground">
-                <option value="openai">OpenAI</option>
-                <option value="google">Google</option>
-              </select>
+            <label class="block text-xs font-medium uppercase mb-1">Model override</label>
+            <div class="flex gap-2 items-center">
               <input
                 v-model.trim="customModel"
                 type="text"
+                placeholder="Leave blank to use the API default"
                 class="flex-1 border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-secondary bg-surface text-foreground"
               />
               <span class="self-center text-xs text-foreground/50 whitespace-nowrap">
-                Autofilled, override with model names e.g. "gpt-5.4-mini"
+                Optional manual override only
               </span>
             </div>
           </div>
@@ -396,7 +398,9 @@
 </template>
 
 <script setup>
-import { ref, inject, computed, watch, reactive } from 'vue';
+import { ref, inject, computed, watch, reactive, toRaw } from 'vue';
+
+const GABRIEL_PLUGIN_VERSION = '1.0.5-manual-shape-sync';
 
 const props = defineProps([
   'codes',
@@ -480,9 +484,11 @@ const buildCommonRequestBody = ({
   extraParams,
 }) => {
   const body = {
-    model,
     ...extraParams,
   };
+
+  const normalizedModel = (model ?? '').trim();
+  if (normalizedModel) body.model = normalizedModel;
 
   if (nRuns !== null && nRuns !== '') body.n_runs = Number(nRuns);
   if (nRounds !== null && nRounds !== '') body.n_rounds = Number(nRounds);
@@ -501,6 +507,7 @@ const requestJson = async ({ requestFn, url, body }) => {
       const response = await axiosClient.post(url, body, {
         headers: {
           'X-Requested-With': 'XMLHttpRequest',
+          'X-GABRIEL-Plugin-Version': GABRIEL_PLUGIN_VERSION,
         },
       });
 
@@ -535,6 +542,7 @@ const requestJson = async ({ requestFn, url, body }) => {
       headers: {
         'Content-Type': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
+        'X-GABRIEL-Plugin-Version': GABRIEL_PLUGIN_VERSION,
         ...(csrf ? { 'X-CSRF-TOKEN': csrf } : {}),
       },
       body: JSON.stringify(body),
@@ -726,8 +734,7 @@ const switchTab = (key) => {
 const selections = computed(() => inputAdapter.getSelections());
 
 // ── Shared state ──────────────────────────────────────────────────────────
-const modelProvider = ref('openai');
-const customModel = ref('gpt-5-mini');
+const customModel = ref('');
 const nRuns = ref(null);
 const nRounds = ref(null);
 const extraParamsJson = ref('');
@@ -735,15 +742,9 @@ const loading = ref(false);
 const error = ref(null);
 const results = ref([]);
 
-const defaultModelByProvider = {
-  openai: 'gpt-5-mini',
-  google: 'gemini-2.0-flash',
-};
-
 const effectiveModel = computed(() => {
   const explicit = (customModel.value ?? '').trim();
-  if (explicit) return explicit;
-  return defaultModelByProvider[modelProvider.value] ?? defaultModelByProvider.openai;
+  return explicit;
 });
 
 // ── Codify ────────────────────────────────────────────────────────────────
@@ -763,7 +764,7 @@ const updateCheckedSources = () => {
     return;
   }
 
-  // Fallback for standalone/CodifyView contexts
+  // Fallback for contexts without checked source props
   if (typeof analyzeApi.eachCheckedSources === 'function') {
     const out = [];
     analyzeApi.eachCheckedSources((s) => out.push(s));
@@ -812,6 +813,207 @@ const getCodeDescription = (code) => {
 const codifyTextsPool = ref([]);
 const codifyAppliedCount = ref(null);
 
+// ── Helper Functions (must be before watchers that use them) ─────────────
+const walkCodes = (codes, visit) => {
+  if (!Array.isArray(codes) || typeof visit !== 'function') return;
+  for (const code of codes) {
+    if (!code || typeof code !== 'object') continue;
+    visit(code);
+    if (Array.isArray(code.children) && code.children.length > 0) {
+      walkCodes(code.children, visit);
+    }
+  }
+};
+
+const findCodeById = (codeId) => {
+  const targetId = String(codeId ?? '');
+  if (!targetId) return null;
+
+  let found = null;
+  walkCodes(availableCodes.value, (code) => {
+    if (found) return;
+    if (String(code?.id ?? '') === targetId) {
+      found = code;
+    }
+  });
+
+  return found;
+};
+
+const findLinkedCodeForSelection = (selection) => {
+  if (!selection || typeof selection !== 'object') return null;
+
+  const codeFromSelection = selection.code;
+  const codeFromSelectionId =
+    codeFromSelection && String(codeFromSelection.id ?? '').length > 0
+      ? findCodeById(codeFromSelection.id) ?? codeFromSelection
+      : null;
+
+  if (codeFromSelectionId) return codeFromSelectionId;
+
+  const codeId = String(selection.code_id ?? '');
+  if (!codeId) return null;
+  return findCodeById(codeId);
+};
+
+const normalizeSelectionShape = (selection) => {
+  if (!selection || typeof selection !== 'object') return;
+
+  const linkedCode = findLinkedCodeForSelection(selection);
+  if (linkedCode) {
+    normalizeSelectionShapeForCode(selection, linkedCode);
+    return;
+  }
+
+  const start = Number(selection.start ?? selection.start_position ?? NaN);
+  const end = Number(selection.end ?? selection.end_position ?? NaN);
+  if (!Number.isNaN(start)) {
+    selection.start = start;
+    if (selection.start_position === undefined) selection.start_position = start;
+  }
+  if (!Number.isNaN(end)) {
+    selection.end = end;
+    if (selection.end_position === undefined) selection.end_position = end;
+  }
+};
+
+const normalizeSelectionShapeForCode = (selection, code) => {
+  if (!selection || typeof selection !== 'object' || !code || typeof code !== 'object') return;
+
+  const normalizedCodeId = String(code.id ?? '');
+  if (!normalizedCodeId) return;
+
+  if (!selection.code || String(selection.code.id ?? '') !== normalizedCodeId) {
+    selection.code = code;
+  }
+
+  if (String(selection.code_id ?? '') !== normalizedCodeId) {
+    selection.code_id = code.id;
+  }
+
+  const start = Number(selection.start ?? selection.start_position ?? NaN);
+  const end = Number(selection.end ?? selection.end_position ?? NaN);
+
+  if (!Number.isNaN(start)) {
+    selection.start = start;
+    if (selection.start_position === undefined) selection.start_position = start;
+  }
+
+  if (!Number.isNaN(end)) {
+    selection.end = end;
+    if (selection.end_position === undefined) selection.end_position = end;
+  }
+};
+
+const normalizePluginSelectionLinks = () => {
+  walkCodes(availableCodes.value, (code) => {
+    if (!Array.isArray(code.text)) return;
+    code.text.forEach((selection) => normalizeSelectionShapeForCode(selection, code));
+  });
+};
+
+const normalizeVisibleSelections = () => {
+  if (!Array.isArray(selections.value) || selections.value.length === 0) return;
+
+  for (const selection of selections.value) {
+    normalizeSelectionShape(selection);
+  }
+};
+
+const upsertSelectionIntoCode = ({ code, selection }) => {
+  if (!code || typeof code !== 'object' || !selection || typeof selection !== 'object') return;
+
+  if (!Array.isArray(code.text)) {
+    code.text = [];
+  }
+
+  normalizeSelectionShapeForCode(selection, code);
+
+  const byIdIndex = code.text.findIndex((entry) => String(entry?.id ?? '') === String(selection.id ?? ''));
+  if (byIdIndex >= 0) {
+    Object.assign(code.text[byIdIndex], selection);
+    normalizeSelectionShapeForCode(code.text[byIdIndex], code);
+    return;
+  }
+
+  const selectionSourceId = String(selection.source_id ?? selection.sourceId ?? '');
+  const selectionStart = Number(selection.start ?? selection.start_position ?? NaN);
+  const selectionEnd = Number(selection.end ?? selection.end_position ?? NaN);
+
+  const byRangeIndex = code.text.findIndex((entry) => {
+    const entrySourceId = String(entry?.source_id ?? entry?.sourceId ?? '');
+    const entryCodeId = String(entry?.code_id ?? entry?.code?.id ?? '');
+    const entryStart = Number(entry?.start ?? entry?.start_position ?? NaN);
+    const entryEnd = Number(entry?.end ?? entry?.end_position ?? NaN);
+
+    return (
+      entrySourceId === selectionSourceId
+      && entryCodeId === String(code.id)
+      && entryStart === selectionStart
+      && entryEnd === selectionEnd
+    );
+  });
+
+  if (byRangeIndex >= 0) {
+    Object.assign(code.text[byRangeIndex], selection);
+    normalizeSelectionShapeForCode(code.text[byRangeIndex], code);
+    return;
+  }
+
+  code.text.push(selection);
+};
+
+const upsertSelectionIntoVisibleSelections = (selection) => {
+  if (!selection || typeof selection !== 'object') return;
+  if (!Array.isArray(selections.value)) return;
+
+  normalizeSelectionShape(selection);
+
+  const byIdIndex = selections.value.findIndex(
+    (entry) => String(entry?.id ?? '') === String(selection.id ?? '')
+  );
+
+  if (byIdIndex >= 0) {
+    Object.assign(selections.value[byIdIndex], selection);
+    normalizeSelectionShape(selections.value[byIdIndex]);
+    return;
+  }
+
+  selections.value.push(selection);
+};
+
+const buildManualLikeSelection = ({ serverSelection, passage, sourceId, code, range }) => {
+  const start = Number(serverSelection?.start ?? serverSelection?.start_position ?? range.start);
+  const end = Number(serverSelection?.end ?? serverSelection?.end_position ?? range.end);
+  const rawCode = code ? toRaw(code) : null;
+
+  return {
+    ...serverSelection,
+    id: serverSelection?.id,
+    text: serverSelection?.text ?? passage,
+    source_id: serverSelection?.source_id ?? sourceId,
+    code_id: serverSelection?.code_id ?? code?.id ?? codify.selectedCodeId,
+    start,
+    end,
+    start_position: Number(serverSelection?.start_position ?? start),
+    end_position: Number(serverSelection?.end_position ?? end),
+    length: end - start,
+    code: rawCode,
+  };
+};
+
+const commitSelectionToClientState = ({ code, selection }) => {
+  if (!code || !selection) return;
+
+  upsertSelectionIntoCode({ code, selection });
+  upsertSelectionIntoVisibleSelections(selection);
+
+  walkCodes(availableCodes.value, (currentCode) => {
+    if (String(currentCode?.id ?? '') !== String(selection.code_id ?? '')) return;
+    upsertSelectionIntoCode({ code: currentCode, selection });
+  });
+};
+
 // Auto-fill description when a code is selected (immediate so it fires on first pick)
 watch(
   selectedCode,
@@ -832,15 +1034,33 @@ watch(
       return;
     }
 
-    const exists = codes.some(
-      (code) => String(code.id) === String(codify.selectedCodeId)
-    );
+    const exists = !!findCodeById(codify.selectedCodeId);
     if (!exists) {
       codify.selectedCodeId = String(codes[0].id);
     }
+
+    normalizePluginSelectionLinks();
+    normalizeVisibleSelections();
   },
-  { immediate: true }
+  { immediate: true, deep: true }
 );
+
+watch(
+  selections,
+  () => {
+    normalizeVisibleSelections();
+  },
+  { immediate: true, deep: true }
+);
+
+let hasLoggedPluginVersion = false;
+const logPluginVersion = () => {
+  if (hasLoggedPluginVersion) return;
+  hasLoggedPluginVersion = true;
+  console.info(`[GABRIEL] plugin version ${GABRIEL_PLUGIN_VERSION} loaded`);
+};
+
+logPluginVersion();
 
 // ── Classify ──────────────────────────────────────────────────────────────
 const classify = reactive({
@@ -907,6 +1127,82 @@ const getOriginalText = (id) => {
   }
   const sel = selections.value.find((s) => String(s.id) === String(id));
   return sel ? sel.text : '';
+};
+
+
+const chunkTranscriptString = (
+  transcript,
+  chunkMaxSize = 50000,
+  overlapChars = 1000,
+) => {
+  if (!transcript || typeof transcript !== 'string') return [''];
+
+  const normalizedChunkMax = Math.max(1000, Number(chunkMaxSize) || 50000);
+  const normalizedOverlap = Math.max(0, Math.min(normalizedChunkMax - 1, Number(overlapChars) || 0));
+
+  const chunks = [];
+  const paras = transcript
+    .split('\n\n')
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0);
+
+  let cur = '';
+  for (const paragraph of paras) {
+    const next = cur ? `${cur}\n\n${paragraph}` : paragraph;
+    if (next.length > normalizedChunkMax && cur.length > 0) {
+      chunks.push(cur);
+      cur = paragraph;
+      continue;
+    }
+
+    if (paragraph.length > normalizedChunkMax) {
+      if (cur.length > 0) {
+        chunks.push(cur);
+        cur = '';
+      }
+
+      for (let i = 0; i < paragraph.length; i += normalizedChunkMax) {
+        chunks.push(paragraph.slice(i, i + normalizedChunkMax));
+      }
+      continue;
+    }
+
+    cur = next;
+  }
+
+  if (cur.length > 0) chunks.push(cur);
+  if (chunks.length === 0) return [transcript];
+  if (normalizedOverlap === 0 || chunks.length === 1) return chunks;
+
+  const withOverlap = [chunks[0]];
+  for (let i = 1; i < chunks.length; i += 1) {
+    const tail = chunks[i - 1].slice(-normalizedOverlap);
+    withOverlap.push(`${tail}\n\n${chunks[i]}`);
+  }
+  return withOverlap;
+};
+
+const getCodifyChunkConfig = (transcriptLength) => {
+  const length = Number(transcriptLength) || 0;
+
+  if (length <= 60000) {
+    return {
+      maxSize: 60000,
+      overlapChars: 0,
+    };
+  }
+
+  if (length <= 180000) {
+    return {
+      maxSize: 50000,
+      overlapChars: 1000,
+    };
+  }
+
+  return {
+    maxSize: 80000,
+    overlapChars: 1500,
+  };
 };
 
 const htmlToPlainText = (html) => {
@@ -979,6 +1275,7 @@ const findPassageRange = (text, passage, fromIndex = 0) => {
 const persistCodifySelections = async ({ transcript, items, sourceId }) => {
   const projectId = getProjectIdFromPath();
   const codeId = String(codify.selectedCodeId ?? '');
+  const selectedCodeRef = selectedCode.value ?? findCodeById(codeId);
 
   if (!projectId || !sourceId || !codeId) {
     return { saved: 0, skipped: 0, failed: 0 };
@@ -1043,6 +1340,22 @@ const persistCodifySelections = async ({ transcript, items, sourceId }) => {
     } else {
       saved += 1;
       existingRanges.add(rangeKey);
+
+      const serverSelection = writeRes.response?.data?.selection;
+      if (selectedCodeRef && serverSelection) {
+        const manualLikeSelection = buildManualLikeSelection({
+          serverSelection,
+          passage,
+          sourceId,
+          code: selectedCodeRef,
+          range,
+        });
+
+        commitSelectionToClientState({
+          code: selectedCodeRef,
+          selection: manualLikeSelection,
+        });
+      }
     }
 
     searchFrom = range.end;
@@ -1117,42 +1430,75 @@ const run = async () => {
         text: transcript,
       });
 
-      const singleBody = { ...body };
-      Object.assign(
-        singleBody,
-        buildFunctionPayload({
-          functionKey: activeTab.value,
-          selections: [{ id: String(source.id), text: transcript }],
-          selectedCodeName: selectedCodeName.value,
-          codify,
-          classify,
-          extract,
-          filter,
-          rate,
-        })
+      let sourceAppliedCount = 0;
+      const chunkConfig = getCodifyChunkConfig(transcript.length);
+      const chunks = chunkTranscriptString(
+        transcript,
+        chunkConfig.maxSize,
+        chunkConfig.overlapChars,
       );
+      let sourceItemsMap = new Map();
 
-      const res = await requestJson({
-        requestFn: analyzeApi.request,
-        url: currentFunction.endpoint,
-        body: singleBody,
-      });
+      for (const chunk of chunks) {
+        const singleBody = { ...body };
+        Object.assign(
+          singleBody,
+          buildFunctionPayload({
+            functionKey: activeTab.value,
+            selections: [{ id: String(source.id), text: chunk }],
+            selectedCodeName: selectedCodeName.value,
+            codify,
+            classify,
+            extract,
+            filter,
+            rate,
+          })
+        );
 
-      if (res.error || !res.response || res.response.status >= 400) {
-        error.value = normalizeError(res);
-        hasFailure = true;
-        break;
+        const res = await requestJson({
+          requestFn: analyzeApi.request,
+          url: currentFunction.endpoint,
+          body: singleBody,
+        });
+
+        if (res.error || !res.response || res.response.status >= 400) {
+          error.value = normalizeError(res);
+          hasFailure = true;
+          break;
+        }
+
+        const items = res.response.data ?? [];
+        for (const item of items) {
+          const normalizedId = String(item.id);
+          if (!sourceItemsMap.has(normalizedId)) {
+            sourceItemsMap.set(normalizedId, {
+              id: normalizedId,
+              passages: [],
+              seenPassages: new Set(),
+            });
+          }
+
+          const target = sourceItemsMap.get(normalizedId);
+          const passages = Array.isArray(item.passages) ? item.passages : [];
+          for (const passage of passages) {
+            if (typeof passage !== 'string') continue;
+            const normalizedPassage = passage.trim();
+            if (!normalizedPassage || target.seenPassages.has(normalizedPassage)) continue;
+            target.seenPassages.add(normalizedPassage);
+            target.passages.push(passage);
+            sourceAppliedCount += 1;
+          }
+        }
       }
 
-      const items = res.response.data ?? [];
-      const appliedInSource = items.reduce(
-        (count, item) => count + (Array.isArray(item.passages) ? item.passages.length : 0),
-        0
-      );
-      totalAppliedCount += appliedInSource;
+      totalAppliedCount += sourceAppliedCount;
+      const mergedItems = Array.from(sourceItemsMap.values()).map((entry) => ({
+        id: entry.id,
+        passages: entry.passages,
+      }));
 
-      if (transcript && items.length > 0) {
-        const persisted = await persistCodifySelections({ transcript, items, sourceId: String(source.id) });
+      if (transcript && mergedItems.length > 0) {
+        const persisted = await persistCodifySelections({ transcript, items: mergedItems, sourceId: String(source.id) });
         if (persisted.failed > 0 && persisted.saved === 0) {
           failMessage = persisted.firstFailure
             ? `Codify matched passages, but some were not saved to OpenQDA selections. ${persisted.firstFailure}`
@@ -1160,7 +1506,8 @@ const run = async () => {
         }
       }
 
-      results.value.push(...items);
+      results.value.push(...mergedItems);
+      if (hasFailure) break;
     }
 
     if (failMessage && !error.value) {
@@ -1170,34 +1517,45 @@ const run = async () => {
     codifyAppliedCount.value = totalAppliedCount;
     loading.value = false;
   } else {
-    Object.assign(
-      body,
-      buildFunctionPayload({
-        functionKey: activeTab.value,
-        selections: selections.value,
-        selectedCodeName: selectedCodeName.value,
-        codify,
-        classify,
-        extract,
-        filter,
-        rate,
-      })
-    );
+    const CHUNK_SIZE = 50; 
+    let allItems = [];
+    let initialError = null;
 
-    const res = await requestJson({
-      requestFn: analyzeApi.request,
-      url: currentFunction.endpoint,
-      body,
-    });
+    for (let i = 0; i < selections.value.length; i += CHUNK_SIZE) {
+      const chunkSelections = selections.value.slice(i, i + CHUNK_SIZE);
+      const chunkBody = { ...body };
+      Object.assign(
+        chunkBody,
+        buildFunctionPayload({
+          functionKey: activeTab.value,
+          selections: chunkSelections,
+          selectedCodeName: selectedCodeName.value,
+          codify,
+          classify,
+          extract,
+          filter,
+          rate,
+        })
+      );
+      
+      const res = await requestJson({
+        requestFn: analyzeApi.request,
+        url: currentFunction.endpoint,
+        body: chunkBody,
+      });
 
-    if (res.error || !res.response || res.response.status >= 400) {
-      error.value = normalizeError(res);
-      loading.value = false;
-      return;
+      if (res.error || !res.response || res.response.status >= 400) {
+        initialError = normalizeError(res);
+        break;
+      }
+      
+      allItems.push(...(res.response.data ?? []));
     }
-
-    const items = res.response.data ?? [];
-    results.value = items;
+    
+    if (initialError) {
+      error.value = initialError;
+    }
+    results.value = allItems;
     loading.value = false;
   }
 };
