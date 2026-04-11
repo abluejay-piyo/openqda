@@ -67,7 +67,11 @@ export const useSelections = () => {
   };
   const deleteSelection = async (selection) => {
     const sourceId = source.id;
-    const code = selection.code ?? { id: null, texts: [] };
+    const code = selection.code ?? { id: selection.code_id ?? null, texts: [] };
+
+    if (!code.id) {
+      throw new Error('Cannot delete selection without a linked code_id');
+    }
 
     const { response, error } = await Selections.delete({
       projectId,
