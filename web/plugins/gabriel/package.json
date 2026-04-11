@@ -1,0 +1,15 @@
+{
+  "name": "@openqda/gabriel",
+  "version": "1.0.0",
+  "description": "GABRIEL AI analysis plugins for OpenQDA – codify, rate, classify, deidentify, extract, filter",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "OpenQDA Contributors",
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "@heroicons/vue": "*",
+    "vue": "*"
+  }
+}

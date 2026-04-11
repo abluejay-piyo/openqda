@@ -10,6 +10,7 @@
 // --------------------------------------------------------------------------//
 import { OpenQDAPlugins } from './resources/js/exchange/OpenQDAPlugins.js'
 import registerVisualizationPlugins from '@openqda/visualization';
+import registerGabriel from '@openqda/gabriel';
 
 // --------------------------------------------------------------------------//
 // PLACE YOUR CUSTOM PLUGIN IMPORTS HERE AND MAKE SURE YOU REGISTER THEM AT
@@ -25,4 +26,4 @@ registerVisualizationPlugins(OpenQDAPlugins);
 // --------------------------------------------------------------------------//
 // REGISTER CUSTOM PLUGINS
 // --------------------------------------------------------------------------//
-// registerMyPlugin(OpenQDAPlugins);
+registerGabriel(OpenQDAPlugins);
