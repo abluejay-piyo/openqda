@@ -19,7 +19,12 @@
     </div>
 
     <!-- Description -->
-    <p class="text-sm text-foreground/60">{{ currentTab.desc }}</p>
+    <div class="flex items-center justify-between gap-2">
+      <p class="text-sm text-foreground/60">{{ currentTab.desc }}</p>
+      <span class="text-[11px] px-2 py-0.5 rounded border border-border text-foreground/50 bg-surface/50">
+        Plugin v{{ GABRIEL_PLUGIN_VERSION }}
+      </span>
+    </div>
 
     <!-- Config form -->
     <form @submit.prevent="run" class="space-y-3">
@@ -244,6 +249,14 @@
                 placeholder="n_rounds"
                 class="w-full border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-secondary bg-surface text-foreground"
               />
+              <input
+                v-model.number="nParallels"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="n_parallels"
+                class="w-full border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-secondary bg-surface text-foreground"
+              />
             </div>
           </div>
 
@@ -397,6 +410,9 @@
 
 <script setup>
 import { ref, inject, computed, watch, reactive } from 'vue';
+import gabrielPackage from '../package.json';
+
+const GABRIEL_PLUGIN_VERSION = gabrielPackage?.version ?? 'dev';
 
 const props = defineProps([
   'codes',
@@ -477,15 +493,16 @@ const buildCommonRequestBody = ({
   model,
   nRuns,
   nRounds,
+  nParallels,
   extraParams,
 }) => {
-  const body = {
-    model,
-    ...extraParams,
-  };
+  const body = { ...extraParams };
+
+  if (model) body.model = model;
 
   if (nRuns !== null && nRuns !== '') body.n_runs = Number(nRuns);
   if (nRounds !== null && nRounds !== '') body.n_rounds = Number(nRounds);
+  if (nParallels !== null && nParallels !== '') body.n_parallels = Number(nParallels);
 
   return body;
 };
@@ -575,6 +592,10 @@ const normalizeError = (res) => {
 
   if (data?.errors && typeof data.errors === 'object') {
     detail += ` - ${Object.values(data.errors).flat().join('; ')}`;
+  }
+
+  if (res?.response?.status === 524 || /status code 524/i.test(res?.error?.message ?? '')) {
+    return 'Request timed out while Gabriel was processing the batch. Try fewer passages or lower n_parallels in Advanced options.';
   }
 
   return `Request failed: ${detail}`;
@@ -727,23 +748,18 @@ const selections = computed(() => inputAdapter.getSelections());
 
 // ── Shared state ──────────────────────────────────────────────────────────
 const modelProvider = ref('openai');
-const customModel = ref('gpt-5-mini');
+const customModel = ref('');
 const nRuns = ref(null);
 const nRounds = ref(null);
+const nParallels = ref(null);
 const extraParamsJson = ref('');
 const loading = ref(false);
 const error = ref(null);
 const results = ref([]);
 
-const defaultModelByProvider = {
-  openai: 'gpt-5-mini',
-  google: 'gemini-2.0-flash',
-};
-
 const effectiveModel = computed(() => {
   const explicit = (customModel.value ?? '').trim();
-  if (explicit) return explicit;
-  return defaultModelByProvider[modelProvider.value] ?? defaultModelByProvider.openai;
+  return explicit || undefined;
 });
 
 // ── Codify ────────────────────────────────────────────────────────────────
@@ -1077,11 +1093,18 @@ const run = async () => {
     return;
   }
 
+  if (nParallels.value !== null && Number(nParallels.value) < 1) {
+    error.value = 'n_parallels must be at least 1.';
+    loading.value = false;
+    return;
+  }
+
   const currentFunction = getGabrielFunction(activeTab.value);
   const body = buildCommonRequestBody({
     model: effectiveModel.value,
     nRuns: nRuns.value,
     nRounds: nRounds.value,
+    nParallels: nParallels.value,
     extraParams: extraParamsResult.value,
   });
 
