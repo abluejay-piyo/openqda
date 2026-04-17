@@ -225,7 +225,7 @@
                 class="flex-1 border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-secondary bg-surface text-foreground"
               />
               <span class="self-center text-xs text-foreground/50 whitespace-nowrap">
-                Autofilled, override with model names e.g. "gpt-5.4-mini"
+                Leave blank to use provider default (Google: "gemini-flash-latest").
               </span>
             </div>
           </div>
@@ -410,6 +410,7 @@
 
 <script setup>
 import { ref, inject, computed, watch, reactive } from 'vue';
+import Quill from 'quill';
 import gabrielPackage from '../package.json';
 
 const GABRIEL_PLUGIN_VERSION = gabrielPackage?.version ?? 'dev';
@@ -759,7 +760,13 @@ const results = ref([]);
 
 const effectiveModel = computed(() => {
   const explicit = (customModel.value ?? '').trim();
-  return explicit || undefined;
+  if (explicit) return explicit;
+
+  if (modelProvider.value === 'google') {
+    return 'gemini-flash-latest';
+  }
+
+  return undefined;
 });
 
 // ── Codify ────────────────────────────────────────────────────────────────
@@ -768,25 +775,7 @@ const availableCodes = computed(() => inputAdapter.getCodes());
 const codifySources = ref([]);
 
 const updateCheckedSources = () => {
-  // If we have props and the Map, use our deep watcher strategy
-  if (props.sources && props.checkedSources) {
-    const list = props.sources.filter(source => {
-      // Force dependency tracking if reactivity applies natively
-      const isChecked = typeof props.checkedSources.get === 'function' && props.checkedSources.get(source.id);
-      return isChecked;
-    });
-    codifySources.value = list;
-    return;
-  }
-
-  // Fallback for standalone/CodifyView contexts
-  if (typeof analyzeApi.eachCheckedSources === 'function') {
-    const out = [];
-    analyzeApi.eachCheckedSources((s) => out.push(s));
-    codifySources.value = out;
-    return;
-  }
-  codifySources.value = readArray(analyzeApi.sources);
+  codifySources.value = inputAdapter.getCheckedSources();
 };
 
 // Listen to deep changes on props so adding new checks forces UI refresh
@@ -794,7 +783,6 @@ watch(() => props, () => {
   updateCheckedSources();
 }, { deep: true, immediate: true });
 const codify = reactive({
-  selectedSourceId: '',
   selectedCodeId: '',
   codeDescription: '',
   instructions: 'Focus only on statements made by the participant/user. Ignore interviewer, facilitator, or AI assistant prompts.',
@@ -925,11 +913,23 @@ const getOriginalText = (id) => {
   return sel ? sel.text : '';
 };
 
+const _invisibleQuill = document.createElement('div');
+let _singletonQuill = null;
+const getQuillInstance = () => {
+  if (!_singletonQuill) {
+    _singletonQuill = new Quill(_invisibleQuill, {
+      modules: { toolbar: false },
+      theme: 'snow'
+    });
+  }
+  return _singletonQuill;
+};
+
 const htmlToPlainText = (html) => {
   if (!html || typeof html !== 'string') return '';
-  const root = document.createElement('div');
-  root.innerHTML = html;
-  return (root.textContent || root.innerText || '').trim();
+  const q = getQuillInstance();
+  q.clipboard.dangerouslyPasteHTML(html);
+  return q.getText();
 };
 
 const fetchSourceTranscript = async (sourceId) => {
@@ -973,6 +973,9 @@ const findPassageRange = (text, passage, fromIndex = 0) => {
   const normalizedPassage = String(passage).trim();
   if (!normalizedPassage) return null;
 
+  // Let's also do a fuzzy match by stripping all whitespace if needed.
+  // The simplest fix for a 10 char shift is often just that the passage
+  // itself was mutated (e.g. by model) or the target has newlines.
   const directIndex = text.indexOf(normalizedPassage, Math.max(0, fromIndex));
   if (directIndex >= 0) {
     return {
@@ -989,7 +992,41 @@ const findPassageRange = (text, passage, fromIndex = 0) => {
     };
   }
 
+  // Add robust matching loop for partials
+  const splitPassage = normalizedPassage.split(/\s+/);
+  
+  if (splitPassage.length > 5) {
+     const startWord = splitPassage.slice(0, 3).join(' ');
+     const endWord = splitPassage.slice(-3).join(' ');
+     
+     const startIdx = text.indexOf(startWord, fallbackIndex >= 0 ? fallbackIndex : fromIndex);
+     if (startIdx >= 0) {
+        const endIdx = text.indexOf(endWord, startIdx);
+        if (endIdx > startIdx) {
+            return {
+                start: startIdx,
+                end: endIdx + endWord.length
+            };
+        }
+     }
+  }
+
   return null;
+};
+
+const sanitizeCodifyPassage = (passage) => {
+  if (typeof passage !== 'string') return '';
+
+  let normalized = passage
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r\n?/g, '\n');
+
+  // Remove stray numbering prefixes from model output such as:
+  // "123\n\nText...", "1) Text...", "2. Text..."
+  normalized = normalized.replace(/^\s*\d+[.):-]?\s*(?:\n+\s*)+/, '');
+  normalized = normalized.replace(/^\s*\d+[.)-]\s+/, '');
+
+  return normalized.trim();
 };
 
 const persistCodifySelections = async ({ transcript, items, sourceId }) => {
@@ -1016,7 +1053,8 @@ const persistCodifySelections = async ({ transcript, items, sourceId }) => {
 
   const passages = items
     .flatMap((item) => (Array.isArray(item?.passages) ? item.passages : []))
-    .filter((passage) => typeof passage === 'string' && passage.trim().length > 0);
+    .map((passage) => sanitizeCodifyPassage(passage))
+    .filter((passage) => passage.length > 0);
 
   let saved = 0;
   let skipped = 0;
@@ -1118,7 +1156,6 @@ const run = async () => {
     codifyTextsPool.value = [];
     results.value = [];
     let totalAppliedCount = 0;
-    let hasFailure = false;
     let failMessage = '';
 
     for (const source of codifySources.value) {
@@ -1128,7 +1165,6 @@ const run = async () => {
           transcript = await fetchSourceTranscript(source.id);
         } catch (e) {
           error.value = e?.message || 'Could not load source text for codify.';
-          hasFailure = true;
           break;
         }
       }
@@ -1163,7 +1199,6 @@ const run = async () => {
 
       if (res.error || !res.response || res.response.status >= 400) {
         error.value = normalizeError(res);
-        hasFailure = true;
         break;
       }
 
