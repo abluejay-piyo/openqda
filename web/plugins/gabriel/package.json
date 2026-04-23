@@ -1,6 +1,6 @@
 {
   "name": "@openqda/gabriel",
-  "version": "1.0.5-manual-shape-sync",
+  "version": "1.0.6-manual-shape-sync",
   "description": "GABRIEL AI analysis plugins for OpenQDA – codify, rate, classify, deidentify, extract, filter",
   "main": "index.js",
   "scripts": {
